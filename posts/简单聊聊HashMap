@@ -1,0 +1,185 @@
+众所周知哈！jdk1.8 对 HashMap 做了一个较大的优化，为提高它的查询效率引入其红黑树，即：数组+链表+红黑树。我们都知道数组：查询快、增删慢；链表：增删快、查询慢，当我们在项目中无法评估业务中查询和增删占比时，急需一个综合性的数据结构，那就是 HashMap
+
+# 一、聊聊它的数据结构
+
+HashMap的基本工作原理就是通过对数据的key应用一个hash函数来确定当前数据存放在数据的哪个位置，即计算下标，当发生hash冲突时该数据会被插入到当前位置的尾部形成链表(尾插法，之前是头插法)，伴随着存入的数据越来越多，发生hash冲突概率就会增加，因此链表就会越来越长从而影响查询效率。1.8之后在满足一定情况下会将链表树化提高查询速度。
+
+我们知道在书结构中，查询效率最高的是平衡二叉树，但是平衡二叉树在平衡的过程中会产生较大的消耗，因此HashMap再平衡效率和开销的前提下，选择了性价比最高的红黑树，至于这个数据结构有时间单独说(如：旋转、着色等)
+
+# 二、聊聊它的参数
+
+## 2.1 DEFAULT_INITIAL_CAPACITY
+
+```java
+static final int DEFAULT_INITIAL_CAPACITY = 1 << 4;
+```
+
+默认初始容量:16，1 << 4 = 10000 -> 16
+
+为什么初始化容量是 16？我们知道最简单的hash算法就是除法取模，读过算法导论的同学应该记得在除法取模的时候尽量避开2的次方，应该选择一个素数，那这里为什么HashMap反其道而行之，采用这种非常规设计，主要是为了在取模和扩容时做优化，同时为了减少冲突。可以看**第三节HashMap是如何设计它的hash算法的**。
+
+## 2.2 MAXIMUM_CAPACITY
+
+```java
+static final int MAXIMUM_CAPACITY = 1 << 30;
+```
+
+最大容量：很大的一个数，当HashMap容量(k-v个数)真的达到了这个值会做最后一次扩容，之后就不在扩容了
+
+```java
+// resize() 方法里的一段代码
+if (oldCap >= MAXIMUM_CAPACITY) {
+  threshold = Integer.MAX_VALUE;
+  return oldTab;
+}
+```
+
+## 2.3 DEFAULT_LOAD_FACTOR
+
+```java
+static final float DEFAULT_LOAD_FACTOR = 0.75f;
+```
+
+扩容因子：0.75，该参数的含义是当数组达到了当前容量的0.75，就会对齐进行扩容，由之前的16变成32，64...该参数是一个经验值，因为HashMap的扩容会伴随着元素的移位，树和链表的转换会消耗一定的开销。
+
+## 2.4 TREEIFY*
+
+```java
+static final int TREEIFY_THRESHOLD = 8;
+```
+
+树化条件之一：8，链表长度达到8会将其转换成红黑树
+
+```java
+static final int UNTREEIFY_THRESHOLD = 6;
+```
+
+反树化：6，当红黑树节点小于6，退化成链表
+
+```java
+static final int MIN_TREEIFY_CAPACITY = 64;
+```
+
+树化条件之二：64，只有当数组的长度达到64才会进行树化
+
+# 三、聊聊它的hash函数
+
+最简单的定位算法就是 index = hash % n，但是当我们看 put 源码时发现，HashMap 使用的是 (n-1) & hash。这是处于计算效率的考虑，在计算机中最快的计算方式是位运算而 (n-1) & hash 在 n 是 2 的次方条件下与 hash % n 有一样的效果。
+
+我们知道 2 的次方二进制有如下规律：1，10，100，1000 ...，这里取 n = 16 来验证，首先 15 = 1111，hash值为int类型32位二进制，因此对于一个任意的 32 位二进制与 1111 进行按位与一定
+
+有一个最小值：0000
+
+<img src="https://s6.jpg.cm/2022/03/26/LCpy58.png" style="zoom:50%;" />
+
+有一个最大值：1111
+
+<img src="https://s6.jpg.cm/2022/03/26/LCvu4H.png" style="zoom:50%;" />
+
+而 0000 - 1111 正是 0 - 15，与取模的效果一致
+
+但是这种方式会增加hash冲突的概率，因为参与定位的只有低位，因此对于如何获取key的hash值将起重要作用。下面是 HashMap 中使用的 hash 算法
+
+```java
+static final int hash(Object key) {
+    int h;
+    return (key == null) ? 0 : (h = key.hashCode()) ^ (h >>> 16);
+}
+```
+
+我们知道在 java 中每个对象都可以调用其 hashCode() 方法获取自身的 hash 值，那为什么不直接使用反而做了如此复杂的位运算呢？
+
+该 hash 算法核心逻辑就是通过 hashCode() 获取 hash 值后，与自身右移16位的新值做异或操作。
+
+先解决第一个问题右移 16 是为了什么。上面说道定位的算法 hash 值高位不参与计算，那右移 16 的目的就是把高位移下来通过异或操作让高位也参与到定位的算法中，图解如下：
+
+<img src="https://s6.jpg.cm/2022/03/26/LCv1ML.png" style="zoom:50%;" />
+
+解决第二个问题为什么是异或，与和或为什么不行，图解如下：
+
+<img src="https://s6.jpg.cm/2022/03/26/LCvtkU.png" style="zoom:50%;" />
+
+可以看出只有异或操作的结果 01 概率才是 50%，其中与操作偏向 0，或操作偏向 1，这也是在 HashMap 设计时考虑的一个细节
+
+# 四、聊聊它的 put 方法
+
+流程图如下：
+
+<img src="https://s6.jpg.cm/2022/03/26/LCvY7w.png" style="zoom:50%;" />
+
+① 判断键值对数组table[i]是否为空或为null，否则执行resize()进行扩容； 
+
+② 根据键值key计算hash值得到插入的数组索引i，如果table[i]==null，直接新建节点添加，转向⑥，如果table[i]不为空，转向③
+
+③ 判断table[i]的首个元素是否和key一样，如果相同直接覆盖value，否则转向④，这里的相同指的是hashCode以及equals； 
+
+④ 判断table[i] 是否为treeNode，即table[i] 是否是红黑树，如果是红黑树，则直接在树中插入键值对，否则转向⑤； 
+
+⑤ 遍历table[i]，判断链表长度是否大于8，大于8的话把链表转换为红黑树，在红黑树中执行插入操作，否则进行链表的插入操作；遍历过程中若发现key已经存在直接覆盖value即可； 
+
+⑥ 插入成功后，判断实际存在的键值对数量size是否超多了最大容量threshold，如果超过，进行扩容。
+
+注：触发覆盖逻辑时 put 会返回旧值，这一点源码是可以看出来的
+
+```java
+public V put(K key, V value) {
+    // 对key的hashCode()做hash
+    return putVal(hash(key), key, value, false, true);
+}
+
+final V putVal(int hash, K key, V value, boolean onlyIfAbsent,
+               boolean evict) {
+    Node<K,V>[] tab; Node<K,V> p; int n, i;
+    // 步骤①：tab为空则创建
+    if ((tab = table) == null || (n = tab.length) == 0)
+        n = (tab = resize()).length;
+    // 步骤②：计算index，并对null做处理 
+    if ((p = tab[i = (n - 1) & hash]) == null) 
+        tab[i] = newNode(hash, key, value, null);
+    else {
+        Node<K,V> e; K k;
+        // 步骤③：节点key存在，直接覆盖value
+        if (p.hash == hash &&
+            ((k = p.key) == key || (key != null && key.equals(k))))
+            e = p;
+        // 步骤④：判断该链为红黑树
+        else if (p instanceof TreeNode)
+            e = ((TreeNode<K,V>)p).putTreeVal(this, tab, hash, key, value);
+        // 步骤⑤：该链为链表
+        else {
+            for (int binCount = 0; ; ++binCount) {
+                if ((e = p.next) == null) {
+                    p.next = newNode(hash, key,value,null);
+                     //链表长度大于8转换为红黑树进行处理
+                    if (binCount >= TREEIFY_THRESHOLD - 1) // -1 for 1st  
+                        treeifyBin(tab, hash);
+                    break;
+                }
+                 // key已经存在直接覆盖value
+                if (e.hash == hash &&
+                    ((k = e.key) == key || (key != null && key.equals(k)))) 
+							break;
+                p = e;
+            }
+        }
+        
+        if (e != null) { // existing mapping for key
+            V oldValue = e.value;
+            if (!onlyIfAbsent || oldValue == null)
+                e.value = value;
+            afterNodeAccess(e);
+            // 返回旧值
+            return oldValue;
+        }
+    }
+
+    ++modCount;
+    // 步骤⑥：超过最大容量 就扩容
+    if (++size > threshold)
+        resize();
+    afterNodeInsertion(evict);
+    return null;
+}
+
+```
+
